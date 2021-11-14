@@ -11,9 +11,10 @@ var shaderProgram;
 var modelview_uniform;
 var normal_uniform;
 var projection_uniform;
-var texture, texture2;
+var texture, texture2, texture3;
 var sampler_uniform;
 var sampler2_uniform;
+var sampler3_uniform;
 var teapot_vao;
 var vert_pos_attr;
 var vert_normal_attr;
@@ -33,11 +34,22 @@ uniform mat3 uNormalMatrix;
 uniform mat4 uProjectionMatrix;
 
 out vec2 vTexCoord;
-out vec3 vNormal;
+out vec3 normal;
+out vec3 light;
+out vec3 vertex;
+out vec3 preModelVertex;
 
 void main() {
-  vTexCoord.s = aVertexPosition.x + 0.5;
-  vTexCoord.t = aVertexPosition.y + 0.5;
+  
+  normal = normalize(uNormalMatrix*aVertexNormal);
+  light = normalize(vec3(0.5,0.5,1.5));
+  vec4 p = uModelViewMatrix*vec4(aVertexPosition, 1.0);
+  vertex = normalize(-p.xyz);
+  
+  preModelVertex = aVertexPosition;
+
+  vTexCoord.s = 0.5*normal.x + 0.5;
+  vTexCoord.t = 0.5*normal.y + 0.5;
 
   gl_Position = uProjectionMatrix*uModelViewMatrix*vec4(aVertexPosition, 1.0);
 }
@@ -51,17 +63,82 @@ var fs = `#version 300 es
 
 precision mediump float;
     
-in vec3 vNormal;
 in vec2 vTexCoord;
+in vec3 normal;
+in vec3 light;
+in vec3 vertex;
+in vec3 preModelVertex;
 uniform sampler2D uSampler;
 uniform sampler2D uSampler2;
+uniform sampler2D uSampler3;
 
 out vec4 outColor;
     
 void main() {
-  vec3 illinois = vec3(texture(uSampler, vTexCoord));
+
+  const float PI = 3.1415926;
+  const float DELTA_S_T = 1.0/512.0;
+
+
+  vec2 illCoord;
+  illCoord.s = -atan(preModelVertex.z, preModelVertex.x)/(PI * 2.0) + 0.5;
+  illCoord.t = 2.5*preModelVertex.y + 0.5;
+  
+  //vec2 bumpSCoord;
+  //bumpSCoord.s = -atan(preModelVertex.z, preModelVertex.x)/(3.1415926 * 2.0) + 0.5;
+  //bumpSCoord.t = 2.5*preModelVertex.y + 0.5;
+  
+  //vec2 bumpTCoord;
+  //bumpTCoord.s = illCoord.s;
+  //bumpTCoord.t = illCoord.t + 0.1;
+  
+  vec3 illinois = vec3(texture(uSampler, illCoord));
   vec3 stadium = vec3(texture(uSampler2, vTexCoord));
-  vec3 c = 0.5*illinois + 0.5*stadium;
+  vec3 bumpMap = vec3(texture(uSampler3, illCoord));
+  
+  vec3 bumpMapPrevS = vec3(texture(uSampler3, illCoord + vec2(-DELTA_S_T,0)));
+  vec3 bumpMapPrevT = vec3(texture(uSampler3, illCoord + vec2(0,-DELTA_S_T)));
+  vec3 bumpMapNextS = vec3(texture(uSampler3, illCoord + vec2(DELTA_S_T,0)));
+  vec3 bumpMapNextT = vec3(texture(uSampler3, illCoord + vec2(0,DELTA_S_T)));
+  float dBds = length(bumpMapNextS) + length(bumpMapPrevS) - 2.0*length(bumpMap);
+  float dBdt = length(bumpMapNextT) + length(bumpMapPrevT) - 2.0*length(bumpMap);
+  
+  //Crop edges of illinois image
+  if(illCoord.x > 0.9 || illCoord.y > 0.9 || illCoord.x < 0.1 || illCoord.y < 0.1)
+  {
+    illinois = vec3(1.0,1.0,1.0);
+	dBds = 0.0;
+	dBdt = 0.0;
+  }
+  
+  vec3 nnorm = normalize(normal);
+  vec3 lnorm = normalize(light);
+  vec3 vnorm = normalize(vertex);
+  
+  dBds*=2.0;
+  dBdt*=2.0;
+  nnorm = nnorm + dBds*cross(nnorm, vec3(1.0,0.0,0.0)) + dBdt*cross(nnorm, vec3(0.0,1.0,0.0));
+  nnorm = normalize(nnorm);
+  
+  //nnorm.x = nnorm.x + 10.0*dBds;
+  //nnorm.y = nnorm.y + 10.0*dBdt;
+  //nnorm = normalize(nnorm);
+  
+  //nnorm = normalize(nnorm + illinois);
+
+  vec3 r = reflect(-lnorm,nnorm);
+  float kd_stadium = 0.5*length(illinois);//0.75;
+  float kd_illinois = 0.5;
+  float ks_stadium = 0.25;
+  float ks_light = 0.25;
+  vec3 c = stadium*kd_stadium*max(dot(nnorm,lnorm),0.0) +  
+           illinois*kd_illinois*max(dot(nnorm,lnorm),0.0) + 
+		   //bumpMap*kd_illinois*max(dot(nnorm,lnorm),0.0) + 
+		   //bumpMapNextS*kd_illinois*max(dot(nnorm,lnorm),0.0) + 
+		   //bumpMapNextT*kd_illinois*max(dot(nnorm,lnorm),0.0) + 
+           vec3(1.0,1.0,1.0)*ks_light*pow(max(dot(vnorm,r),0.0),10.0) +
+		   stadium*ks_stadium*pow(max(dot(vnorm,r),0.0),10.0);
+		   
 
   outColor = vec4(c,1.0);
 }
@@ -188,6 +265,34 @@ function initwebgl() {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, image2);
     gl.generateMipmap(gl.TEXTURE_2D);
   });
+  
+  //
+  // set up third texture and sampler
+  //
+
+  texture3 = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture3);
+
+  var sampler3 = gl.createSampler();
+  gl.bindSampler(2, sampler3);
+
+  //
+  // load texture image using webgl2fundamentals boilerplate
+  // initially creates just a 1x1 blue pixel as a placeholder
+  // replaced by actual texture image once loaded
+  //
+
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA,
+                gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 255, 255]));
+
+  var image3 = new Image();
+  image3.src = "bumpMap.png";
+
+  image3.addEventListener("load", function() {
+    gl.bindTexture(gl.TEXTURE_2D, texture3);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 512, 512, 0, gl.RGBA, gl.UNSIGNED_BYTE, image3);
+    gl.generateMipmap(gl.TEXTURE_2D);
+  });
 
   //
   // set up transformation matrices
@@ -234,6 +339,7 @@ function loadshaders(vertexShaderSource,fragmentShaderSource) {
   projection_uniform = gl.getUniformLocation(shaderProgram, "uProjectionMatrix"); 
   sampler_uniform = gl.getUniformLocation(shaderProgram, "uSampler"); 
   sampler2_uniform = gl.getUniformLocation(shaderProgram, "uSampler2"); 
+  sampler3_uniform = gl.getUniformLocation(shaderProgram, "uSampler3"); 
 }
 
 //
@@ -262,11 +368,14 @@ function draw(time) {
 
   gl.uniform1i(sampler_uniform,0);
   gl.uniform1i(sampler2_uniform,1);
+  gl.uniform1i(sampler3_uniform,2);
 
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, texture);
   gl.activeTexture(gl.TEXTURE1);
   gl.bindTexture(gl.TEXTURE_2D, texture2);
+  gl.activeTexture(gl.TEXTURE2);
+  gl.bindTexture(gl.TEXTURE_3D, texture3);
 
   gl.bindVertexArray(teapot_vao);
   gl.drawElements(gl.TRIANGLES,
